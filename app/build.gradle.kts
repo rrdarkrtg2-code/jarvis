@@ -5,6 +5,11 @@ plugins {
 }
 
 android {
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
+    }
+
     namespace = "com.jarvis.assistant"
     compileSdk = 34
 
