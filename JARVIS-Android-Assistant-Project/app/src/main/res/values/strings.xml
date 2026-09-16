@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">J.A.R.V.I.S.</string>
+    <string name="app_subtitle">Personal AI Operating Assistant</string>
+    <string name="accessibility_service_label">J.A.R.V.I.S. Device Automation</string>
+    <string name="accessibility_service_description">Enables J.A.R.V.I.S. to assist with legitimate screen interactions, such as scrolling, tapping UI buttons, and navigation on user request.</string>
+    <string name="notification_listener_label">J.A.R.V.I.S. Notification Assistant</string>
+    <string name="tile_label">J.A.R.V.I.S.</string>
+</resources>
