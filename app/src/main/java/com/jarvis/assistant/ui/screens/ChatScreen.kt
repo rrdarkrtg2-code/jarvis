@@ -175,7 +175,7 @@ fun MessageBubble(message: MessageEntity, onSpeak: () -> Unit) {
                 ) {
                     Text(
                         text = if (isUser) "YOU" else "J.A.R.V.I.S.",
-                        color = if (isUser) JarvisCyan else JarvisCyanBright,
+                        color = if (isUser) JarvisCyan else JarvisCyan,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold
                     )
