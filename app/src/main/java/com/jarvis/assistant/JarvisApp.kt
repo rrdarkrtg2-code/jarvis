@@ -8,7 +8,9 @@ import android.os.Build
 import com.jarvis.assistant.ai.AIContextBuilder
 import com.jarvis.assistant.ai.AIProvider
 import com.jarvis.assistant.ai.GeminiProvider
+import com.jarvis.assistant.ai.GrokProvider
 import com.jarvis.assistant.ai.LocalLanProvider
+import com.jarvis.assistant.ai.MultiTierAIProvider
 import com.jarvis.assistant.ai.OpenAIProvider
 import com.jarvis.assistant.ai.OpenRouterProvider
 import com.jarvis.assistant.automation.AppDiscoveryManager
@@ -24,6 +26,7 @@ import com.jarvis.assistant.data.repository.SettingsRepository
 import com.jarvis.assistant.engine.ConfirmationSystem
 import com.jarvis.assistant.engine.IntentRouter
 import com.jarvis.assistant.engine.LocalCommandEngine
+import com.jarvis.assistant.engine.UsageLimitManager
 import com.jarvis.assistant.reminders.ReminderManager
 import com.jarvis.assistant.voice.VoiceEngine
 import kotlinx.coroutines.runBlocking
@@ -43,6 +46,8 @@ class JarvisApp : Application() {
     lateinit var auditRepository: AuditRepository
         private set
     lateinit var settingsRepository: SettingsRepository
+        private set
+    lateinit var usageLimitManager: UsageLimitManager
         private set
     lateinit var deviceController: DeviceController
         private set
@@ -74,6 +79,11 @@ class JarvisApp : Application() {
         conversationRepository = ConversationRepository(database.conversationDao())
         auditRepository = AuditRepository(database.auditLogDao())
         settingsRepository = SettingsRepository(database.preferenceDao())
+        usageLimitManager = UsageLimitManager(settingsRepository)
+
+        runBlocking {
+            usageLimitManager.initialize()
+        }
 
         deviceController = DeviceController(this)
         appDiscoveryManager = AppDiscoveryManager(this)
@@ -97,38 +107,49 @@ class JarvisApp : Application() {
             auditRepository = auditRepository,
             aiContextBuilder = aiContextBuilder,
             confirmationSystem = confirmationSystem,
+            usageLimitManager = usageLimitManager,
             aiProviderSelector = { getActiveAIProvider() }
         )
 
         voiceEngine = VoiceEngine(
             context = this,
-            onSpeechRecognized = { text ->
-                // Broadcast or handle in ViewModel
-            },
-            onError = { err ->
-                // Voice error handling
-            },
-            onAudioLevel = { level ->
-                // Visualizer level
-            }
+            onSpeechRecognized = {},
+            onError = {},
+            onAudioLevel = {}
         )
     }
 
     fun getActiveAIProvider(): AIProvider? {
-        val providerName = runBlocking { settingsRepository.getString(Constants.KEY_AI_PROVIDER, Constants.PROVIDER_GEMINI) }
-        val model = runBlocking { settingsRepository.getString(Constants.KEY_AI_MODEL, "") }
+        val primaryName = runBlocking { settingsRepository.getString(Constants.KEY_AI_PROVIDER, Constants.PROVIDER_GEMINI) }
+        val primaryModel = runBlocking { settingsRepository.getString(Constants.KEY_AI_MODEL, "") }
+        val primary = createProviderInstance(primaryName, primaryModel, isFallback = false) ?: return null
 
-        return when (providerName) {
+        val fallbackName = runBlocking { settingsRepository.getString(Constants.KEY_AI_PROVIDER_FALLBACK, "None") }
+        val fallbackModel = runBlocking { settingsRepository.getString(Constants.KEY_AI_MODEL_FALLBACK, "") }
+        val fallback = if (fallbackName.isNotEmpty() && fallbackName != "None") {
+            createProviderInstance(fallbackName, fallbackModel, isFallback = true)
+        } else null
+
+        return MultiTierAIProvider(primary, fallback)
+    }
+
+    private fun createProviderInstance(name: String, model: String, isFallback: Boolean): AIProvider? {
+        val keySuffix = if (isFallback) "_fallback" else ""
+        return when (name) {
+            Constants.PROVIDER_GROK -> GrokProvider(
+                apiKeyProvider = { securityManager.getApiKey("${Constants.PROVIDER_GROK}$keySuffix") },
+                model = model.ifEmpty { Constants.DEFAULT_GROK_MODEL }
+            )
             Constants.PROVIDER_GEMINI -> GeminiProvider(
-                apiKeyProvider = { securityManager.getApiKey(Constants.PROVIDER_GEMINI) },
+                apiKeyProvider = { securityManager.getApiKey("${Constants.PROVIDER_GEMINI}$keySuffix") },
                 model = model.ifEmpty { Constants.DEFAULT_GEMINI_MODEL }
             )
             Constants.PROVIDER_OPENAI -> OpenAIProvider(
-                apiKeyProvider = { securityManager.getApiKey(Constants.PROVIDER_OPENAI) },
+                apiKeyProvider = { securityManager.getApiKey("${Constants.PROVIDER_OPENAI}$keySuffix") },
                 model = model.ifEmpty { Constants.DEFAULT_OPENAI_MODEL }
             )
             Constants.PROVIDER_OPENROUTER -> OpenRouterProvider(
-                apiKeyProvider = { securityManager.getApiKey(Constants.PROVIDER_OPENROUTER) },
+                apiKeyProvider = { securityManager.getApiKey("${Constants.PROVIDER_OPENROUTER}$keySuffix") },
                 model = model.ifEmpty { Constants.DEFAULT_OPENROUTER_MODEL }
             )
             Constants.PROVIDER_LOCAL_LAN -> LocalLanProvider(

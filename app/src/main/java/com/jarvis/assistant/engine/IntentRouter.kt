@@ -28,6 +28,7 @@ class IntentRouter(
     private val auditRepository: AuditRepository,
     private val aiContextBuilder: AIContextBuilder,
     private val confirmationSystem: ConfirmationSystem,
+    private val usageLimitManager: UsageLimitManager,
     private val aiProviderSelector: () -> AIProvider?
 ) {
 
@@ -37,7 +38,7 @@ class IntentRouter(
             return AssistantResponse("Yes, I am listening.", "How can I assist you?")
         }
 
-        // 1. Math / Calculator
+        // 1. Math / Calculator (Always 100% FREE & OFFLINE)
         val calcResult = CalculatorEngine.evaluate(trimmed)
         if (calcResult != null) {
             val reply = "The result is $calcResult."
@@ -45,7 +46,7 @@ class IntentRouter(
             return AssistantResponse(reply)
         }
 
-        // 2. Deterministic Local Commands
+        // 2. Deterministic Local Commands (Always 100% FREE & OFFLINE)
         val pattern = localCommandEngine.parseCommand(trimmed)
         if (pattern != null) {
             val localResponse = handleLocalPattern(pattern, trimmed)
@@ -54,10 +55,18 @@ class IntentRouter(
             }
         }
 
-        // 3. Fallback to AI Provider
+        // 3. Conversational AI Queries (Subject to Free Usage Limit / Quota)
+        if (!usageLimitManager.hasAvailableTime()) {
+            val quotaMsg = "Your 5 hours of free AI talk time has expired. Please watch a quick ad in Settings or on the Home screen to renew and add 1 more hour of AI time."
+            auditRepository.recordAction("ai_query", trimmed, "LOW", "LIMIT_REACHED", quotaMsg)
+            return AssistantResponse(quotaMsg)
+        }
+
         val provider = aiProviderSelector()
         if (provider != null) {
             try {
+                usageLimitManager.deductTime(12L)
+
                 val context = aiContextBuilder.buildContext(trimmed, conversationId)
                 val aiResponse = provider.generateResponse(trimmed, context)
 
@@ -74,89 +83,36 @@ class IntentRouter(
                     return AssistantResponse(aiResponse.text)
                 }
             } catch (e: Exception) {
-                return AssistantResponse("I encountered an issue contacting the AI service. Please verify your connection or API key.")
+                return AssistantResponse("I encountered an issue contacting the AI service. Please verify your connection.")
             }
         }
 
-        // 4. No AI Provider Configured
-        val defaultMsg = "I couldn't match a local command for that request. To enable conversational AI, please configure an API key in Settings -> AI Providers."
+        val defaultMsg = "I couldn't match a local command for that request. AI services are currently unconfigured by the administrator."
         auditRepository.recordAction("unknown_command", trimmed, "LOW", "UNHANDLED", defaultMsg)
         return AssistantResponse(defaultMsg)
     }
 
     private suspend fun handleLocalPattern(pattern: CommandPattern, rawQuery: String): AssistantResponse? {
         return when (pattern) {
-            is CommandPattern.GetBattery -> {
-                val status = deviceController.getBatteryLevel()
-                auditRepository.recordAction("device_query", rawQuery, "LOW", "SUCCESS", status)
-                AssistantResponse(status)
-            }
+            is CommandPattern.GetBattery -> AssistantResponse(deviceController.getBatteryLevel())
             is CommandPattern.ToggleFlashlight -> {
                 val success = deviceController.setFlashlight(pattern.enable)
-                val msg = if (success) {
-                    if (pattern.enable) "Flashlight turned on." else "Flashlight turned off."
-                } else {
-                    "Unable to toggle flashlight. Device camera or flash hardware might be unavailable."
-                }
-                auditRepository.recordAction("hardware_control", rawQuery, "LOW", if (success) "SUCCESS" else "FAILURE", msg)
-                AssistantResponse(msg)
+                AssistantResponse(if (success) (if (pattern.enable) "Flashlight turned on." else "Flashlight turned off.") else "Unable to toggle flashlight.")
             }
-            is CommandPattern.GetTime -> {
-                val time = deviceController.getCurrentTime()
-                AssistantResponse(time)
-            }
-            is CommandPattern.GetDate -> {
-                val date = deviceController.getCurrentDate()
-                AssistantResponse(date)
-            }
-            is CommandPattern.GetDay -> {
-                val day = deviceController.getCurrentDay()
-                AssistantResponse(day)
-            }
-            is CommandPattern.AdjustVolume -> {
-                val res = deviceController.adjustVolume(pattern.up)
-                AssistantResponse(res)
-            }
-            is CommandPattern.GoHome -> {
-                val success = AccessibilityController.goHome()
-                val msg = if (success) "Navigating to home screen." else "Accessibility service is required to navigate home."
-                AssistantResponse(msg)
-            }
-            is CommandPattern.GoBack -> {
-                val success = AccessibilityController.goBack()
-                val msg = if (success) "Going back." else "Accessibility service is required to go back."
-                AssistantResponse(msg)
-            }
-            is CommandPattern.ShowRecentApps -> {
-                val success = AccessibilityController.showRecents()
-                val msg = if (success) "Showing recent apps." else "Accessibility service is required to show recents."
-                AssistantResponse(msg)
-            }
-            is CommandPattern.TakeScreenshot -> {
-                val success = AccessibilityController.takeScreenshot()
-                val msg = if (success) "Screenshot captured." else "Accessibility service is required to take screenshots."
-                AssistantResponse(msg)
-            }
-            is CommandPattern.OpenSettings -> {
-                val success = deviceController.openSettings(pattern.type)
-                val msg = if (success) "Opening settings." else "Could not open settings."
-                AssistantResponse(msg)
-            }
+            is CommandPattern.GetTime -> AssistantResponse(deviceController.getCurrentTime())
+            is CommandPattern.GetDate -> AssistantResponse(deviceController.getCurrentDate())
+            is CommandPattern.GetDay -> AssistantResponse(deviceController.getCurrentDay())
+            is CommandPattern.AdjustVolume -> AssistantResponse(deviceController.adjustVolume(pattern.up))
+            is CommandPattern.GoHome -> AssistantResponse(if (AccessibilityController.goHome()) "Navigating home." else "Accessibility required.")
+            is CommandPattern.GoBack -> AssistantResponse(if (AccessibilityController.goBack()) "Going back." else "Accessibility required.")
+            is CommandPattern.ShowRecentApps -> AssistantResponse(if (AccessibilityController.showRecents()) "Showing recents." else "Accessibility required.")
+            is CommandPattern.TakeScreenshot -> AssistantResponse(if (AccessibilityController.takeScreenshot()) "Screenshot captured." else "Accessibility required.")
+            is CommandPattern.OpenSettings -> AssistantResponse(if (deviceController.openSettings(pattern.type)) "Opening settings." else "Could not open settings.")
             is CommandPattern.OpenApp -> {
                 when (val res = appDiscoveryManager.findAndLaunchApp(pattern.appName)) {
-                    is AppLaunchResult.Launched -> {
-                        val msg = "Opening ${res.appName}."
-                        auditRepository.recordAction("app_launch", rawQuery, "LOW", "SUCCESS", msg)
-                        AssistantResponse(msg)
-                    }
-                    is AppLaunchResult.DisambiguationRequired -> {
-                        val msg = "Found multiple matching apps: ${res.candidates.joinToString(", ")}. Which one should I open?"
-                        AssistantResponse(msg)
-                    }
-                    is AppLaunchResult.NotFound -> {
-                        val msg = "I couldn't find '${pattern.appName}' installed on this device."
-                        AssistantResponse(msg)
-                    }
+                    is AppLaunchResult.Launched -> AssistantResponse("Opening ${res.appName}.")
+                    is AppLaunchResult.DisambiguationRequired -> AssistantResponse("Found multiple apps: ${res.candidates.joinToString(", ")}. Which one?")
+                    is AppLaunchResult.NotFound -> AssistantResponse("I couldn't find '${pattern.appName}' installed on this device.")
                 }
             }
             is CommandPattern.SearchYouTube -> {
@@ -167,57 +123,31 @@ class IntentRouter(
                 deviceController.searchWeb(pattern.query)
                 AssistantResponse("Searching the web for '${pattern.query}'.")
             }
-            is CommandPattern.ShowReminders -> {
-                val reminders = reminderManager.toString()
-                AssistantResponse("Displaying your active reminders.")
-            }
+            is CommandPattern.ShowReminders -> AssistantResponse("Displaying active reminders.")
             is CommandPattern.CreateReminder -> {
                 val delay = extractMinutes(pattern.query)
                 val title = cleanReminderTitle(pattern.query)
                 val msg = reminderManager.scheduleReminder(title, delay)
-                auditRepository.recordAction("reminder_create", rawQuery, "MEDIUM", "SUCCESS", msg)
                 AssistantResponse(msg)
             }
             is CommandPattern.StoreMemory -> {
                 memoryRepository.addMemory("user_fact", pattern.content, 2)
-                val msg = "Understood. I will remember that."
-                auditRepository.recordAction("memory_store", rawQuery, "LOW", "SUCCESS", pattern.content)
-                AssistantResponse(msg)
+                AssistantResponse("Understood. I will remember that.")
             }
             is CommandPattern.RecallMemory -> {
                 val memories = memoryRepository.getRelevantContextForQuery(pattern.query)
-                val msg = if (memories.isNotEmpty()) {
-                    "Here is what I remember: " + memories.joinToString("; ") { it.content }
-                } else {
-                    "I don't have any specific memories saved matching that."
-                }
-                AssistantResponse(msg)
+                AssistantResponse(if (memories.isNotEmpty()) "I remember: " + memories.joinToString("; ") { it.content } else "No memories found matching that.")
             }
             is CommandPattern.AccessibilityAction -> {
                 when (pattern.action) {
-                    "scroll_down" -> {
-                        val success = AccessibilityController.scroll(forward = true)
-                        AssistantResponse(if (success) "Scrolled down." else "Could not scroll. Make sure Accessibility is enabled.")
-                    }
-                    "scroll_up" -> {
-                        val success = AccessibilityController.scroll(forward = false)
-                        AssistantResponse(if (success) "Scrolled up." else "Could not scroll.")
-                    }
-                    "tap_text" -> {
-                        val res = AccessibilityController.clickByText(pattern.param)
-                        AssistantResponse(res)
-                    }
-                    "read_screen" -> {
-                        val summary = AccessibilityController.readVisibleScreen()
-                        AssistantResponse(summary)
-                    }
+                    "scroll_down" -> AssistantResponse(if (AccessibilityController.scroll(forward = true)) "Scrolled down." else "Could not scroll.")
+                    "scroll_up" -> AssistantResponse(if (AccessibilityController.scroll(forward = false)) "Scrolled up." else "Could not scroll.")
+                    "tap_text" -> AssistantResponse(AccessibilityController.clickByText(pattern.param))
+                    "read_screen" -> AssistantResponse(AccessibilityController.readVisibleScreen())
                     else -> null
                 }
             }
-            is CommandPattern.ReadNotifications -> {
-                val summary = NotificationController.summarizeNotifications()
-                AssistantResponse(summary)
-            }
+            is CommandPattern.ReadNotifications -> AssistantResponse(NotificationController.summarizeNotifications())
         }
     }
 
@@ -228,8 +158,8 @@ class IntentRouter(
                 val res = appDiscoveryManager.findAndLaunchApp(app)
                 when (res) {
                     is AppLaunchResult.Launched -> AssistantResponse("Opening ${res.appName}.")
-                    is AppLaunchResult.DisambiguationRequired -> AssistantResponse("Multiple apps found: ${res.candidates.joinToString(", ")}. Which one?")
-                    is AppLaunchResult.NotFound -> AssistantResponse("I could not find '$app' on this device.")
+                    is AppLaunchResult.DisambiguationRequired -> AssistantResponse("Multiple apps: ${res.candidates.joinToString(", ")}. Which one?")
+                    is AppLaunchResult.NotFound -> AssistantResponse("Couldn't find '$app' on this device.")
                 }
             }
             "search_web" -> {
@@ -242,9 +172,7 @@ class IntentRouter(
                 deviceController.searchYouTube(q)
                 AssistantResponse("Searching YouTube for '$q'.")
             }
-            "get_battery" -> {
-                AssistantResponse(deviceController.getBatteryLevel())
-            }
+            "get_battery" -> AssistantResponse(deviceController.getBatteryLevel())
             "toggle_flashlight" -> {
                 val enable = toolCall.arguments["enable"] as? Boolean ?: true
                 val ok = deviceController.setFlashlight(enable)
@@ -253,8 +181,7 @@ class IntentRouter(
             "create_reminder" -> {
                 val title = toolCall.arguments["title"]?.toString() ?: "Reminder"
                 val mins = (toolCall.arguments["minutes_from_now"] as? Number)?.toInt() ?: 10
-                val msg = reminderManager.scheduleReminder(title, mins)
-                AssistantResponse(msg)
+                AssistantResponse(reminderManager.scheduleReminder(title, mins))
             }
             "store_memory" -> {
                 val cat = toolCall.arguments["category"]?.toString() ?: "fact"
@@ -262,9 +189,7 @@ class IntentRouter(
                 memoryRepository.addMemory(cat, content)
                 AssistantResponse("Saved to memory: $content")
             }
-            else -> {
-                AssistantResponse("Executed ${toolCall.name}.")
-            }
+            else -> AssistantResponse("Executed ${toolCall.name}.")
         }
     }
 
