@@ -4,6 +4,13 @@ import android.accessibilityservice.AccessibilityService
 import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 
+data class ScreenElement(
+    val text: String,
+    val isClickable: Boolean,
+    val isEditable: Boolean,
+    val className: String
+)
+
 object AccessibilityController {
 
     private var serviceRef: AccessibilityService? = null
@@ -32,71 +39,118 @@ object AccessibilityController {
         return scrollableNode.performAction(action)
     }
 
-    fun clickByText(text: String): String {
-        val service = serviceRef ?: return "Accessibility automation is not enabled. Please enable J.A.R.V.I.S. in Accessibility Settings."
-        val root = service.rootInActiveWindow ?: return "Could not access the current screen content."
+    fun seeCurrentScreen(): String {
+        val service = serviceRef ?: return "Accessibility is disabled. Enable J.A.R.V.I.S. in Accessibility Settings so I can see and control your screen."
+        val root = service.rootInActiveWindow ?: return "I cannot see the screen right now. Make sure the window is active."
 
-        // Safety check: Avoid clicking in known sensitive or banking / authentication packages
-        val packageName = root.packageName?.toString()?.lowercase() ?: ""
-        if (isSensitivePackage(packageName)) {
-            return "Action blocked by safety policy: J.A.R.V.I.S. does not automate actions inside sensitive financial, banking, or credential screens."
+        val pkgName = root.packageName?.toString() ?: "System"
+        val elements = mutableListOf<ScreenElement>()
+        collectScreenElements(root, elements)
+
+        if (elements.isEmpty()) {
+            return "Looking at ${pkgName.substringAfterLast('.')}, but no readable text or buttons were detected."
         }
 
-        val matchingNodes = root.findAccessibilityNodeInfosByText(text)
-        if (matchingNodes.isNullOrEmpty()) {
-            return "Could not find any button or element with text '$text' on screen."
+        val buttons = elements.filter { it.isClickable && it.text.isNotBlank() }.map { it.text }.distinct()
+        val texts = elements.filter { !it.isClickable && it.text.isNotBlank() }.map { it.text }.distinct()
+        val inputs = elements.filter { it.isEditable }
+
+        val sb = StringBuilder()
+        sb.append("Looking at ").append(pkgName.substringAfterLast('.').replaceFirstChar { it.uppercase() }).append(". ")
+        if (buttons.isNotEmpty()) {
+            sb.append("Tappable buttons: ").append(buttons.take(6).joinToString(", ")).append(". ")
+        }
+        if (inputs.isNotEmpty()) {
+            sb.append("Input field is ready for typing. ")
+        }
+        if (texts.isNotEmpty()) {
+            sb.append("Visible: ").append(texts.take(5).joinToString("; "))
         }
 
-        // Find the most clickable node
-        for (node in matchingNodes) {
-            var current: AccessibilityNodeInfo? = node
-            while (current != null) {
-                if (current.isClickable) {
-                    current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    return "Tapped '$text'."
-                }
-                current = current.parent
+        return sb.toString()
+    }
+
+    fun clickByText(query: String): String {
+        val service = serviceRef ?: return "Accessibility is disabled. Enable J.A.R.V.I.S. in Accessibility Settings."
+        val root = service.rootInActiveWindow ?: return "Could not access screen."
+
+        val target = query.lowercase().trim()
+        val matchingNode = findNodeMatching(root, target)
+
+        if (matchingNode != null) {
+            var clickable: AccessibilityNodeInfo? = matchingNode
+            while (clickable != null && !clickable.isClickable) {
+                clickable = clickable.parent
             }
+            val nodeToClick = clickable ?: matchingNode
+            nodeToClick.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            return "Tapped '$query' on your screen."
         }
 
-        // If not directly clickable, attempt click on first matching node
-        matchingNodes.first().performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        return "Tapped '$text'."
+        return "I could not find '$query' on your screen."
     }
 
-    fun readVisibleScreen(): String {
-        val service = serviceRef ?: return "Accessibility service is not enabled."
-        val root = service.rootInActiveWindow ?: return "Unable to read current screen content."
+    fun typeText(text: String): String {
+        val service = serviceRef ?: return "Accessibility is disabled."
+        val root = service.rootInActiveWindow ?: return "Could not access screen."
 
-        val packageName = root.packageName?.toString()?.lowercase() ?: ""
-        if (isSensitivePackage(packageName)) {
-            return "Screen content hidden for privacy (detected sensitive application)."
+        val editable = findEditableNode(root)
+        if (editable != null) {
+            val arguments = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            }
+            editable.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+            return "Typed '$text' into screen."
         }
 
-        val textCollector = mutableListOf<String>()
-        collectText(root, textCollector)
-
-        if (textCollector.isEmpty()) {
-            return "The current screen does not contain accessible readable text."
-        }
-
-        val summary = textCollector.distinct().take(15).joinToString("; ")
-        return "On screen: $summary"
+        return "Could not find an editable input field on screen."
     }
 
-    private fun collectText(node: AccessibilityNodeInfo?, list: MutableList<String>) {
-        if (node == null) return
-        val text = node.text?.toString()?.trim()
-        val desc = node.contentDescription?.toString()?.trim()
+    private fun findNodeMatching(node: AccessibilityNodeInfo?, query: String): AccessibilityNodeInfo? {
+        if (node == null) return null
+        val nodeText = node.text?.toString()?.lowercase() ?: ""
+        val desc = node.contentDescription?.toString()?.lowercase() ?: ""
 
-        if (!text.isNullOrEmpty() && text.length > 1 && !node.isPassword) {
-            list.add(text)
-        } else if (!desc.isNullOrEmpty() && desc.length > 1 && !node.isPassword) {
-            list.add(desc)
+        if (nodeText.contains(query) || desc.contains(query)) {
+            return node
         }
 
         for (i in 0 until node.childCount) {
-            collectText(node.getChild(i), list)
+            val match = findNodeMatching(node.getChild(i), query)
+            if (match != null) return match
+        }
+        return null
+    }
+
+    private fun findEditableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (node == null) return null
+        if (node.isEditable) return node
+        for (i in 0 until node.childCount) {
+            val editable = findEditableNode(node.getChild(i))
+            if (editable != null) return editable
+        }
+        return null
+    }
+
+    private fun collectScreenElements(node: AccessibilityNodeInfo?, list: MutableList<ScreenElement>) {
+        if (node == null) return
+        val text = node.text?.toString()?.trim() ?: ""
+        val desc = node.contentDescription?.toString()?.trim() ?: ""
+        val effectiveText = if (text.isNotEmpty()) text else desc
+
+        if (effectiveText.isNotEmpty() && !node.isPassword) {
+            list.add(
+                ScreenElement(
+                    text = effectiveText,
+                    isClickable = node.isClickable,
+                    isEditable = node.isEditable,
+                    className = node.className?.toString() ?: ""
+                )
+            )
+        }
+
+        for (i in 0 until node.childCount) {
+            collectScreenElements(node.getChild(i), list)
         }
     }
 
@@ -108,10 +162,5 @@ object AccessibilityController {
             if (result != null) return result
         }
         return null
-    }
-
-    private fun isSensitivePackage(pkg: String): Boolean {
-        val sensitiveKeywords = listOf("bank", "paytm", "gpay", "phonepe", "authenticator", "password", "wallet", "binance", "crypto", "cred")
-        return sensitiveKeywords.any { pkg.contains(it) }
     }
 }

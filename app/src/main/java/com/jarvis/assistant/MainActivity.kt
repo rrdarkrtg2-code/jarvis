@@ -1,6 +1,7 @@
 package com.jarvis.assistant
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -14,9 +15,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Widgets
@@ -28,9 +28,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -41,7 +38,9 @@ import androidx.navigation.compose.rememberNavController
 import com.jarvis.assistant.ui.screens.ChatScreen
 import com.jarvis.assistant.ui.screens.DiagnosticsScreen
 import com.jarvis.assistant.ui.screens.HomeScreen
+import com.jarvis.assistant.ui.screens.LoginScreen
 import com.jarvis.assistant.ui.screens.MemoryScreen
+import com.jarvis.assistant.ui.screens.OwnerMenuScreen
 import com.jarvis.assistant.ui.screens.RemindersScreen
 import com.jarvis.assistant.ui.screens.SettingsScreen
 import com.jarvis.assistant.ui.screens.ToolsScreen
@@ -49,7 +48,6 @@ import com.jarvis.assistant.ui.theme.JARVISTheme
 import com.jarvis.assistant.ui.theme.JarvisBackground
 import com.jarvis.assistant.ui.theme.JarvisCard
 import com.jarvis.assistant.ui.theme.JarvisCyan
-import com.jarvis.assistant.ui.theme.JarvisTextPrimary
 import com.jarvis.assistant.ui.theme.JarvisTextSecondary
 import com.jarvis.assistant.ui.viewmodel.MainViewModel
 
@@ -59,18 +57,28 @@ class MainActivity : ComponentActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        // Permissions granted status callback
-    }
+    ) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestAppPermissions()
 
+        if (intent?.action == Intent.ACTION_ASSIST || intent?.getBooleanExtra("EXTRA_WAKE", false) == true) {
+            viewModel.onMicrophoneClicked()
+        }
+
         setContent {
             JARVISTheme {
                 MainAppNav(viewModel)
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == Intent.ACTION_ASSIST || intent.getBooleanExtra("EXTRA_WAKE", false) == true) {
+            viewModel.onMicrophoneClicked()
         }
     }
 
@@ -89,13 +97,15 @@ class MainActivity : ComponentActivity() {
 }
 
 sealed class Screen(val route: String, val title: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
+    object Login : Screen("login", "Login", Icons.Default.Person)
     object Home : Screen("home", "Home", Icons.Default.Home)
     object Chat : Screen("chat", "Chat", Icons.Default.Chat)
     object Tools : Screen("tools", "Tools", Icons.Default.Widgets)
     object Memory : Screen("memory", "Memory", Icons.Default.Psychology)
     object Reminders : Screen("reminders", "Alerts", Icons.Default.Notifications)
     object Settings : Screen("settings", "Settings", Icons.Default.Settings)
-    object Diagnostics : Screen("diagnostics", "Diagnostics", Icons.Default.MoreHoriz)
+    object OwnerMenu : Screen("owner_menu", "Owner", Icons.Default.Person)
+    object Diagnostics : Screen("diagnostics", "Diagnostics", Icons.Default.Widgets)
 }
 
 @Composable
@@ -112,53 +122,80 @@ fun MainAppNav(viewModel: MainViewModel) {
         Screen.Settings
     )
 
+    val hideBottomBar = currentRoute == Screen.Login.route || currentRoute == Screen.OwnerMenu.route
+
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
             .background(JarvisBackground),
         bottomBar = {
-            NavigationBar(
-                containerColor = JarvisCard,
-                contentColor = JarvisCyan
-            ) {
-                bottomNavScreens.forEach { screen ->
-                    val selected = currentRoute == screen.route
-                    NavigationBarItem(
-                        selected = selected,
-                        onClick = {
-                            if (currentRoute != screen.route) {
-                                navController.navigate(screen.route) {
-                                    popUpTo(Screen.Home.route) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
+            if (!hideBottomBar) {
+                NavigationBar(
+                    containerColor = JarvisCard,
+                    contentColor = JarvisCyan
+                ) {
+                    bottomNavScreens.forEach { screen ->
+                        val selected = currentRoute == screen.route
+                        NavigationBarItem(
+                            selected = selected,
+                            onClick = {
+                                if (currentRoute != screen.route) {
+                                    navController.navigate(screen.route) {
+                                        popUpTo(Screen.Home.route) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
                                 }
-                            }
-                        },
-                        icon = { Icon(screen.icon, contentDescription = screen.title) },
-                        label = { Text(screen.title, fontSize = 11.sp) },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = JarvisBackground,
-                            selectedTextColor = JarvisCyan,
-                            indicatorColor = JarvisCyan,
-                            unselectedIconColor = JarvisTextSecondary,
-                            unselectedTextColor = JarvisTextSecondary
+                            },
+                            icon = { Icon(screen.icon, contentDescription = screen.title) },
+                            label = { Text(screen.title, fontSize = 11.sp) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = JarvisBackground,
+                                selectedTextColor = JarvisCyan,
+                                indicatorColor = JarvisCyan,
+                                unselectedIconColor = JarvisTextSecondary,
+                                unselectedTextColor = JarvisTextSecondary
+                            )
                         )
-                    )
+                    }
                 }
             }
         }
     ) { innerPadding ->
         NavHost(
             navController = navController,
-            startDestination = Screen.Home.route,
+            startDestination = Screen.Login.route,
             modifier = Modifier.padding(innerPadding)
         ) {
+            composable(Screen.Login.route) {
+                LoginScreen(
+                    onLoginSuccess = { isOwner ->
+                        navController.navigate(Screen.Home.route) {
+                            popUpTo(Screen.Login.route) { inclusive = true }
+                        }
+                    }
+                )
+            }
             composable(Screen.Home.route) {
                 HomeScreen(
                     viewModel = viewModel,
                     onNavigateToChat = { navController.navigate(Screen.Chat.route) },
                     onNavigateToTools = { navController.navigate(Screen.Tools.route) },
-                    onNavigateToSettings = { navController.navigate(Screen.Settings.route) }
+                    onNavigateToSettings = { navController.navigate(Screen.Settings.route) },
+                    onOpenOwnerMenu = { navController.navigate(Screen.OwnerMenu.route) }
+                )
+            }
+            composable(Screen.OwnerMenu.route) {
+                OwnerMenuScreen(
+                    viewModel = viewModel,
+                    onNavigateToSettings = { navController.navigate(Screen.Settings.route) },
+                    onNavigateToMemory = { navController.navigate(Screen.Memory.route) },
+                    onNavigateToTools = { navController.navigate(Screen.Tools.route) },
+                    onLogOut = {
+                        navController.navigate(Screen.Login.route) {
+                            popUpTo(0) { inclusive = true }
+                        }
+                    }
                 )
             }
             composable(Screen.Chat.route) {
